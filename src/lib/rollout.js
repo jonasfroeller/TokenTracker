@@ -19684,7 +19684,7 @@ function clearSourceHourlyBuckets(hourlyState, source) {
   }
 }
 
-async function retractStaleGrokQueueRows(queuePath, keepKeys) {
+async function retractStaleSourceQueueRows(queuePath, source, keepKeys) {
   if (!queuePath) return 0;
   let raw = "";
   try {
@@ -19694,7 +19694,7 @@ async function retractStaleGrokQueueRows(queuePath, keepKeys) {
     throw error;
   }
 
-  const latestGrok = new Map();
+  const latestRows = new Map();
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let row;
@@ -19703,21 +19703,21 @@ async function retractStaleGrokQueueRows(queuePath, keepKeys) {
     } catch {
       continue;
     }
-    if ((row?.source || "") !== "grok") continue;
+    if ((row?.source || "") !== source) continue;
     const model = normalizeModelInput(row.model) || DEFAULT_MODEL;
     const hourStart = typeof row.hour_start === "string" ? row.hour_start : null;
     if (!hourStart) continue;
-    latestGrok.set(bucketKey("grok", model, hourStart), { model, hour_start: hourStart, row });
+    latestRows.set(bucketKey(source, model, hourStart), { model, hour_start: hourStart, row });
   }
 
   const zero = initTotals();
   const lines = [];
-  for (const [key, entry] of latestGrok.entries()) {
+  for (const [key, entry] of latestRows.entries()) {
     if (keepKeys.has(key)) continue;
     if (totalsKey(entry.row) === totalsKey(zero)) continue;
     lines.push(
       JSON.stringify({
-        source: "grok",
+        source,
         model: entry.model,
         hour_start: entry.hour_start,
         ...zero,
@@ -20198,7 +20198,7 @@ async function parseGrokBuildIncremental({
       if (!key.startsWith("grok|") || !bucket?.totals) continue;
       keepKeys.add(key);
     }
-    const retracted = await retractStaleGrokQueueRows(queuePath, keepKeys);
+    const retracted = await retractStaleSourceQueueRows(queuePath, "grok", keepKeys);
     bucketsQueued += retracted;
   }
 
@@ -21746,7 +21746,8 @@ async function parseTraeIncremental({
   // retract what it contributed, so rebuild the TRAE buckets from the stores
   // instead of adding every turn on top of them.
   const prior = cursors.trae?.version === TRAE_CURSOR_VERSION ? cursors.trae : null;
-  if (!prior && cursors.trae) clearSourceHourlyBuckets(hourlyState, "trae");
+  const rebuilding = !prior && Boolean(cursors.trae);
+  if (rebuilding) clearSourceHourlyBuckets(hourlyState, "trae");
   const turns = { ...prior?.turns };
   const databases = { ...prior?.databases };
   const stores = [...(prior?.stores || [])];
@@ -21850,8 +21851,20 @@ async function parseTraeIncremental({
     hourlyState.buckets[key].usage_precision = precision === "reported" ? null : precision || null;
   }
   await ensureDir(path.dirname(queuePath));
-  const bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
+  let bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
   cursors.hourly = hourlyState;
+  if (rebuilding) {
+    // Zeroing rows the rebuild did not produce is only safe once every store
+    // was read; otherwise an unreadable store's usage would vanish. Keep the
+    // old ledger so the next sync rebuilds again.
+    if (errors.length) {
+      return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, errors };
+    }
+    // An earlier build may have filed a turn under another bucket key (model or
+    // half-hour); retract those rows so the dashboard does not count it twice.
+    const keepKeys = new Set(Object.keys(hourlyState.buckets).filter((key) => key.startsWith("trae|")));
+    bucketsQueued += await retractStaleSourceQueueRows(queuePath, "trae", keepKeys);
+  }
   cursors.trae = { version: TRAE_CURSOR_VERSION, stores, databases, turns };
   return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, errors };
 }

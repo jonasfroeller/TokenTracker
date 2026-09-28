@@ -228,6 +228,10 @@ test("TRAE parser rebuilds its buckets from an unreadable ledger without duplica
   assert.equal(latest(f.queuePath).total_tokens, 110);
   // A pre-release build's ledger: same buckets, entries this version cannot read.
   f.cursors.trae = { version: 2, turns: { legacy: { totals: { total_tokens: 110 } } }, databases: {} };
+  // That build also filed a turn under a model key this version no longer produces.
+  fs.appendFileSync(f.queuePath, `${JSON.stringify({
+    source: "trae", model: "claude-4-sonnet", hour_start: B1, input_tokens: 90, output_tokens: 9, total_tokens: 99,
+  })}\n`);
   const aggregate = turn({
     id: 2, turn_id: "previously-skipped-turn",
     usage: {
@@ -246,10 +250,33 @@ test("TRAE parser rebuilds its buckets from an unreadable ledger without duplica
   assert.equal(f.cursors.trae.version, 1);
   assert.equal(latest(f.queuePath).total_tokens, 330, "110 + 220, not 110 on top of the old bucket");
   assert.equal(latest(f.queuePath).usage_precision, "mixed");
+  assert.equal(latest(f.queuePath, "claude-4-sonnet").total_tokens, 0, "a key the rebuild no longer produces is retracted");
   const queueBefore = fs.readFileSync(f.queuePath, "utf8");
   await parse(f, [], options);
   assert.equal(reads, 1, "the rebuilt fingerprint resumes normal incremental skips");
   assert.equal(fs.readFileSync(f.queuePath, "utf8"), queueBefore);
+});
+
+test("TRAE parser retries a rebuild instead of retracting usage from an unreadable store", async (t) => {
+  const f = fixture(t);
+  const other = path.join(f.dir, "other.db");
+  fs.writeFileSync(other, "synthetic-database");
+  const rows = { [f.dbPath]: [turn()], [other]: [turn({ id: 9, session_id: "session-two", turn_id: "turn-nine", created_at: T2 })] };
+  const both = { dbPaths: [f.dbPath, other], readUsageRows: async (db) => rows[db] };
+  await parse(f, [], both);
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
+  f.cursors.trae = { version: 2, turns: {}, databases: {} };
+  const locked = await parse(f, [], {
+    ...both,
+    readUsageRows: async (db) => { if (db === other) throw new Error("locked"); return rows[db]; },
+  });
+  assert.equal(locked.errors.length, 1);
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110, "the locked store's usage is not retracted");
+  assert.equal(f.cursors.trae.version, 2, "the rebuild is retried on the next sync");
+  await parse(f, [], both);
+  assert.equal(f.cursors.trae.version, 1);
+  assert.equal(latest(f.queuePath).total_tokens, 110, "no double count after the retried rebuild");
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
 });
 
 test("TRAE ledger stores one compact tuple per turn and reproduces its totals", async (t) => {
