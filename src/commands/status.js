@@ -1127,7 +1127,6 @@ async function cmdStatus(argv = []) {
               installed: true,
               detail: traeDbPaths[0] || traeStoragePath,
               usage_databases: traeDbPaths.length,
-              usage_key_configured: true,
               usage_key_source: process.env.TOKENTRACKER_TRAE_SQLCIPHER_KEY?.trim() ? "environment" : "application",
               ...(traeEntitlement ? { entitlement: traeEntitlement } : {}),
             }

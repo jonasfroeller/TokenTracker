@@ -19664,12 +19664,13 @@ function mergeGrokUsagePrecision(current, next) {
   return "mixed";
 }
 
-function clearGrokHourlyBuckets(hourlyState) {
+function clearSourceHourlyBuckets(hourlyState, source) {
   if (!hourlyState || typeof hourlyState !== "object") return;
+  const prefix = `${source}${BUCKET_SEPARATOR}`;
   const buckets = hourlyState.buckets && typeof hourlyState.buckets === "object" ? hourlyState.buckets : null;
   if (buckets) {
     for (const key of Object.keys(buckets)) {
-      if (key.startsWith("grok|")) delete buckets[key];
+      if (key.startsWith(prefix)) delete buckets[key];
     }
   }
   const groupQueued =
@@ -19678,7 +19679,7 @@ function clearGrokHourlyBuckets(hourlyState) {
       : null;
   if (groupQueued) {
     for (const key of Object.keys(groupQueued)) {
-      if (key.startsWith("grok|")) delete groupQueued[key];
+      if (key.startsWith(prefix)) delete groupQueued[key];
     }
   }
 }
@@ -19816,7 +19817,7 @@ async function parseGrokBuildIncremental({
         legacySeen: true,
       };
     }
-    clearGrokHourlyBuckets(hourlyState);
+    clearSourceHourlyBuckets(hourlyState, "grok");
   } else {
     sessionSnapshots = normalizeGrokSessionSnapshots(grokState);
   }
@@ -21690,6 +21691,41 @@ function isCjkCodePoint(code) {
 // https://www.trae.ai
 //
 // International TRAE usage comes from local encrypted chat_turn metadata.
+//
+// The ledger keeps one compact tuple per turn, keyed by a 128-bit digest, so a
+// correction can retract exactly what the turn contributed even after TRAE
+// deletes its history. Totals are the five token columns; total_tokens is
+// their sum by construction in normalizeTraeUsage.
+const TRAE_CURSOR_VERSION = 1;
+const HALF_HOUR_MS = 30 * 60 * 1000;
+const [T_SESSION, T_MODEL, T_BUCKET, T_MODIFIED, T_STORE, T_INPUT, T_CACHED, T_WRITTEN,
+  T_OUTPUT, T_REASONING, T_CONVERSATIONS, T_ESTIMATED] = Array.from({ length: 12 }, (_, i) => i);
+
+function packTraeTurn({ session, model, bucketStart, totals, modifiedAt, store }) {
+  return [session, model, Date.parse(bucketStart) / HALF_HOUR_MS, modifiedAt, store,
+    totals.input_tokens, totals.cached_input_tokens, totals.cache_creation_input_tokens,
+    totals.output_tokens, totals.reasoning_output_tokens, totals.conversation_count,
+    totals.usage_precision === "estimated" ? 1 : 0];
+}
+
+function unpackTraeTotals(turn) {
+  const totals = {
+    input_tokens: turn[T_INPUT],
+    cached_input_tokens: turn[T_CACHED],
+    cache_creation_input_tokens: turn[T_WRITTEN],
+    output_tokens: turn[T_OUTPUT],
+    reasoning_output_tokens: turn[T_REASONING],
+    total_tokens: turn[T_INPUT] + turn[T_CACHED] + turn[T_WRITTEN] + turn[T_OUTPUT] + turn[T_REASONING],
+    conversation_count: turn[T_CONVERSATIONS],
+  };
+  if (turn[T_ESTIMATED]) totals.usage_precision = "estimated";
+  return totals;
+}
+
+function traeTurnBucketStart(turn) {
+  return new Date(turn[T_BUCKET] * HALF_HOUR_MS).toISOString();
+}
+
 async function parseTraeIncremental({
   dbPaths,
   cursors,
@@ -21699,11 +21735,6 @@ async function parseTraeIncremental({
   readUsageRows = readTraeUsageRows,
 } = {}) {
   const paths = dbPaths || resolveTraeDbPaths(env);
-  const prior = cursors.trae || {};
-  const turns = { ...prior.turns };
-  // v1 fingerprints skipped whole-turn counters and null fields; drop them so
-  // every store is reconciled once (the ledger is kept).
-  const databases = prior.version === 2 ? { ...prior.databases } : {};
   const hourlyState = normalizeHourlyState(cursors.hourly);
   // Queue writes and reads may fail. Publish cursor changes only after the
   // append succeeds, including copies of the mutable bucket totals.
@@ -21711,10 +21742,19 @@ async function parseTraeIncremental({
     key, key.startsWith("trae|") ? { ...bucket, totals: { ...bucket.totals } } : bucket,
   ]));
   hourlyState.groupQueued = { ...hourlyState.groupQueued };
+  // A ledger this version cannot read (e.g. from a pre-release build) cannot
+  // retract what it contributed, so rebuild the TRAE buckets from the stores
+  // instead of adding every turn on top of them.
+  const prior = cursors.trae?.version === TRAE_CURSOR_VERSION ? cursors.trae : null;
+  if (!prior && cursors.trae) clearSourceHourlyBuckets(hourlyState, "trae");
+  const turns = { ...prior?.turns };
+  const databases = { ...prior?.databases };
+  const stores = [...(prior?.stores || [])];
   const touchedBuckets = new Set();
   const conversations = new Set(Object.values(turns)
-    .filter((turn) => turn.totals?.conversation_count > 0).map((turn) => turn.session));
-  const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
+    .filter((turn) => turn[T_CONVERSATIONS] > 0).map((turn) => turn[T_SESSION]));
+  // 128-bit digests: identifiers are hashed before they are stored.
+  const digest = (value) => crypto.createHash("sha256").update(value).digest().subarray(0, 16).toString("base64url");
   let recordsProcessed = 0;
   let eventsAggregated = 0;
   let recordsSkipped = 0;
@@ -21722,6 +21762,8 @@ async function parseTraeIncremental({
   const errors = [];
   for (const dbPath of [...new Set(paths)]) {
     const databaseKey = digest(path.resolve(dbPath));
+    let store = stores.indexOf(databaseKey);
+    if (store < 0) store = stores.push(databaseKey) - 1;
     let rows;
     let fingerprint;
     let finalFingerprint;
@@ -21756,34 +21798,33 @@ async function parseTraeIncremental({
       const identity = digest(JSON.stringify(row.turn_id
         ? [session, row.turn_id] : [databaseKey, rowId]));
       const previous = turns[identity];
-      const modifiedAt = traeTimestamp(row.updated_at) || timestamp;
+      const modifiedAt = Date.parse(traeTimestamp(row.updated_at) || timestamp);
       // A copied turn in another install can lag behind the original. Never
       // let an unrelated rescan of that stale store retract newer usage.
       // Without a newer timestamp, conflicting copies retain their owner.
-      if (previous && previous.database !== databaseKey &&
-        (!previous.modifiedAt || modifiedAt <= previous.modifiedAt)) continue;
+      if (previous && previous[T_STORE] !== store && modifiedAt <= previous[T_MODIFIED]) continue;
       if (!previous && totals.total_tokens === 0) continue;
       if (totals.usage_precision === "estimated") estimatedRecords += 1;
       totals.conversation_count = previous
-        ? previous.totals.conversation_count
+        ? previous[T_CONVERSATIONS]
         : conversations.has(session) ? 0 : 1;
       conversations.add(session);
       const model = normalizeTraeModel(row.model);
-      if (previous && previous.model === model && previous.bucketStart === bucketStart
-        && totalsKey(previous.totals) === totalsKey(totals)
-        && previous.totals.usage_precision === totals.usage_precision) {
-        turns[identity] = { ...previous, modifiedAt, database: databaseKey };
+      const next = packTraeTurn({ session, model, bucketStart, totals, modifiedAt, store });
+      if (previous && next.every((value, i) => i === T_MODIFIED || i === T_STORE || value === previous[i])) {
+        turns[identity] = next;
         continue;
       }
       if (previous) {
-        const old = getHourlyBucket(hourlyState, "trae", previous.model, previous.bucketStart);
-        subtractTotals(old.totals, previous.totals);
-        touchedBuckets.add(bucketKey("trae", previous.model, previous.bucketStart));
+        const previousBucket = traeTurnBucketStart(previous);
+        const old = getHourlyBucket(hourlyState, "trae", previous[T_MODEL], previousBucket);
+        subtractTotals(old.totals, unpackTraeTotals(previous));
+        touchedBuckets.add(bucketKey("trae", previous[T_MODEL], previousBucket));
       }
       const bucket = getHourlyBucket(hourlyState, "trae", model, bucketStart);
       addTotals(bucket.totals, totals);
       touchedBuckets.add(bucketKey("trae", model, bucketStart));
-      turns[identity] = { session, model, bucketStart, totals, modifiedAt, database: databaseKey };
+      turns[identity] = next;
       eventsAggregated += 1;
     }
     // A read that races with a writer must be retried on the next sync.
@@ -21798,10 +21839,10 @@ async function parseTraeIncremental({
   // usage without changing numeric totals, or move it to another bucket.
   const bucketPrecisions = new Map();
   for (const turn of Object.values(turns)) {
-    const key = bucketKey("trae", turn.model, turn.bucketStart);
-    if (!touchedBuckets.has(key) || turn.totals.total_tokens === 0) continue;
+    const key = bucketKey("trae", turn[T_MODEL], traeTurnBucketStart(turn));
+    if (!touchedBuckets.has(key) || unpackTraeTotals(turn).total_tokens === 0) continue;
     bucketPrecisions.set(key, mergeGrokUsagePrecision(
-      bucketPrecisions.get(key), turn.totals.usage_precision || "reported",
+      bucketPrecisions.get(key), turn[T_ESTIMATED] ? "estimated" : "reported",
     ));
   }
   for (const key of touchedBuckets) {
@@ -21811,7 +21852,7 @@ async function parseTraeIncremental({
   await ensureDir(path.dirname(queuePath));
   const bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
   cursors.hourly = hourlyState;
-  cursors.trae = { version: 2, turns, databases };
+  cursors.trae = { version: TRAE_CURSOR_VERSION, stores, databases, turns };
   return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, errors };
 }
 

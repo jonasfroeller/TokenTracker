@@ -143,22 +143,6 @@ function CodeBuddyIcon({ size = 16, className = "" }) {
   );
 }
 
-// International TRAE mark from the installed app's resources/app/out/media/trae-logo.svg.
-function TraeIcon({ size = 16, className = "" }) {
-  return (
-    <img
-      src="/brand-logos/trae.svg"
-      alt=""
-      width={size}
-      height={size}
-      style={{ width: size, height: size, objectFit: "contain" }}
-      className={className}
-      data-brand="trae"
-      aria-hidden="true"
-    />
-  );
-}
-
 // TRAE Work CN — official app-logo mark reverse-engineered from
 // https://work.trae.cn/ favicon (48×48) and PWA manifest icon-512.png
 // (pixel-accurate geometry, 512×512 canvas).
@@ -415,7 +399,6 @@ const PROVIDER_ICON_MAP = {
   "PI-GITHUB-COPILOT": PiIcon,
   "PI-COPILOT": PiIcon,
   ROOCODE: RoocodeIcon,
-  TRAE: TraeIcon,
   "TRAE-CN": TraeCnIcon,
   ZED: ZedIcon,
 };
@@ -464,6 +447,8 @@ const PROVIDER_LOGO_MAP = {
   "VOLCANO-ARK": "/brand-logos/volcano-ark.svg",
   // Cline (CLI v3 / desktop app) — the official robot mark.
   CLINE: "/brand-logos/cline.png",
+  // International TRAE mark from the installed app's resources/app/out/media/trae-logo.svg.
+  TRAE: "/brand-logos/trae.svg",
 };
 
 // AnythingLLM publishes this compact mark in white. Keep the official asset

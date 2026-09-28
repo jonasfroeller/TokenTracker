@@ -222,10 +222,12 @@ test("TRAE parser reconciles turn growth and downward corrections without removi
   assert.equal(latest(f.queuePath).conversation_count, 1);
 });
 
-test("TRAE parser upgrades old fingerprints to import newly supported usage without duplicate tokens", async (t) => {
+test("TRAE parser rebuilds its buckets from an unreadable ledger without duplicate tokens", async (t) => {
   const f = fixture(t);
   await parse(f, [turn()]);
-  f.cursors.trae.version = 1;
+  assert.equal(latest(f.queuePath).total_tokens, 110);
+  // A pre-release build's ledger: same buckets, entries this version cannot read.
+  f.cursors.trae = { version: 2, turns: { legacy: { totals: { total_tokens: 110 } } }, databases: {} };
   const aggregate = turn({
     id: 2, turn_id: "previously-skipped-turn",
     usage: {
@@ -238,16 +240,45 @@ test("TRAE parser upgrades old fingerprints to import newly supported usage with
   const options = {
     readUsageRows: async () => { reads += 1; return [turn(), aggregate]; },
   };
-  const upgraded = await parse(f, [], options);
-  assert.equal(reads, 1, "an unchanged old-version store is reread");
-  assert.equal(upgraded.eventsAggregated, 1, "the retained turn ledger avoids a duplicate import");
-  assert.equal(f.cursors.trae.version, 2);
-  assert.equal(latest(f.queuePath).total_tokens, 330);
+  const rebuilt = await parse(f, [], options);
+  assert.equal(reads, 1, "an unchanged store behind an unreadable ledger is reread");
+  assert.equal(rebuilt.eventsAggregated, 2, "every turn is re-imported into cleared buckets");
+  assert.equal(f.cursors.trae.version, 1);
+  assert.equal(latest(f.queuePath).total_tokens, 330, "110 + 220, not 110 on top of the old bucket");
   assert.equal(latest(f.queuePath).usage_precision, "mixed");
   const queueBefore = fs.readFileSync(f.queuePath, "utf8");
   await parse(f, [], options);
-  assert.equal(reads, 1, "the upgraded fingerprint resumes normal incremental skips");
+  assert.equal(reads, 1, "the rebuilt fingerprint resumes normal incremental skips");
   assert.equal(fs.readFileSync(f.queuePath, "utf8"), queueBefore);
+});
+
+test("TRAE ledger stores one compact tuple per turn and reproduces its totals", async (t) => {
+  const f = fixture(t);
+  const estimated = turn({
+    id: 2, turn_id: "turn-two", created_at: T2,
+    usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_total: 300 },
+  });
+  await parse(f, [turn(), estimated]);
+  const { turns, stores, databases } = f.cursors.trae;
+  assert.equal(stores.length, 1);
+  assert.equal(Object.keys(databases).length, 1);
+  const entries = Object.entries(turns);
+  assert.equal(entries.length, 2);
+  for (const [key, entry] of entries) {
+    assert.match(key, /^[\w-]{22}$/, "turn keys are 128-bit digests");
+    assert.ok(Array.isArray(entry) && entry.length === 12);
+    assert.match(entry[0], /^[\w-]{22}$/, "session ids are stored as digests");
+    assert.ok(JSON.stringify(entry).length < 120, `compact entry: ${JSON.stringify(entry)}`);
+  }
+  assert.ok(!JSON.stringify(f.cursors.trae).includes("session-one"));
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 310);
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).usage_precision, "estimated");
+  // A correction retracts exactly the stored contribution from both buckets.
+  changed(f.dbPath);
+  await parse(f, [turn({ usage: usage(40, 4) }), { ...estimated, usage: usage(50, 5) }]);
+  assert.equal(latest(f.queuePath).total_tokens, 44);
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 55);
+  assert.ok(!latest(f.queuePath, "gpt-5.2", B2).usage_precision, "the estimate flag is retracted too");
 });
 
 test("TRAE parser detects usage updates written only to the SQLite WAL", async (t) => {

@@ -131,7 +131,7 @@ test("auto TRAE sync imports a real database once and reconciles a corrected tur
     assert.equal(first.reasoning_output_tokens, 2);
     assert.equal(first.total_tokens, 110);
     assert.equal(first.conversation_count, 1);
-    assert.equal(readCursors(trackerDir).trae.version, 2);
+    assert.equal(readCursors(trackerDir).trae.version, 1);
 
     const queuePath = path.join(trackerDir, "queue.jsonl");
     const before = fs.readFileSync(queuePath, "utf8");
@@ -283,7 +283,6 @@ test("status detects TRAE usage databases with the application key and no login 
     assert.equal(status.providers.trae.installed, true);
     assert.equal(status.providers.trae.usage_databases, 1);
     assert.equal(status.providers.trae.detail, dbPath);
-    assert.equal(status.providers.trae.usage_key_configured, true);
     assert.equal(status.providers.trae.usage_key_source, "application");
     assert.equal(status.providers.trae.entitlement, undefined);
   });

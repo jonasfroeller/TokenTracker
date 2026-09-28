@@ -126,7 +126,7 @@ describe("ProviderIcon", () => {
 
   it.each(["trae", "TRAE"])("renders the international TRAE mark for %s", (provider) => {
     const { container } = render(<ProviderIcon provider={provider} size={20} className="shrink-0" />);
-    const icon = container.querySelector('img[data-brand="trae"]');
+    const icon = container.querySelector('img[src="/brand-logos/trae.svg"]');
 
     expect(icon).toHaveAttribute("width", "20");
     expect(icon).toHaveAttribute("height", "20");
