@@ -2026,7 +2026,10 @@ async function cmdSync(argv, context = {}) {
           process.stderr.write(`TRAE sync: skipped ${traeResult.recordsSkipped} records with unsupported usage metadata.\n`);
         }
         if (traeResult.estimatedRecords > 0 && !opts.auto) {
-          process.stderr.write(`TRAE sync: ${traeResult.estimatedRecords} records have estimated token breakdowns because historical cache or reasoning details are incomplete.\n`);
+          process.stderr.write(`TRAE sync: ${traeResult.estimatedRecords} Gemini records have repaired thought or cache counters, marked as estimated.\n`);
+        }
+        if (traeResult.unpricedRecords > 0 && !opts.auto) {
+          process.stderr.write(`TRAE sync: ${traeResult.unpricedRecords} multi-request turns include earlier input without a cache split; it is counted in token totals but left out of cost.\n`);
         }
       } catch (err) { warnProviderParseFailure("TRAE", err); }
     }

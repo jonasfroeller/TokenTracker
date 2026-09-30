@@ -5,30 +5,32 @@ const test = require("node:test");
 const { normalizeTraeUsage, normalizeTraeModel } = require("../src/lib/trae-usage");
 const { computeRowCost } = require("../src/lib/pricing");
 
-function counts(input, output, cached = 0, written = 0, reasoning = 0, estimated = false) {
+function counts(input, output, cached = 0, written = 0, reasoning = 0, estimated = false, unpriced = 0) {
   return {
     input_tokens: input,
     cached_input_tokens: cached,
     cache_creation_input_tokens: written,
     output_tokens: output,
     reasoning_output_tokens: reasoning,
-    total_tokens: input + output + cached + written + reasoning,
+    total_tokens: input + output + cached + written + reasoning + unpriced,
+    ...(unpriced ? { unpriced_input_tokens: unpriced } : {}),
     ...(estimated ? { usage_precision: "estimated" } : {}),
   };
 }
 
 test("TRAE whole-turn counters are independent of the last request's total", () => {
   // Token-only shape from a multistep TRAE record: total_tokens is last-step.
+  // Prompt tokens beyond the final request count in total_tokens, unpriced.
   assert.deepEqual(normalizeTraeUsage({
     prompt_tokens: 30_137,
     prompt_tokens_total: 287_918,
     completion_tokens: 635,
     completion_tokens_total: 9_386,
     total_tokens: 30_772,
-  }), counts(287_918, 9_386, 0, 0, 0, true));
+  }), counts(30_137, 9_386, 0, 0, 0, false, 257_781));
 });
 
-test("TRAE credits known last-step cache and inclusive reasoning once in aggregate usage", () => {
+test("TRAE prices only the last request's observed cache split in aggregate usage", () => {
   assert.deepEqual(normalizeTraeUsage({
     prompt_tokens: 100,
     prompt_tokens_total: 1_000,
@@ -38,7 +40,7 @@ test("TRAE credits known last-step cache and inclusive reasoning once in aggrega
     cache_creation_input_tokens: 10,
     reasoning_tokens: 20,
     total_tokens: 130,
-  }), counts(930, 280, 60, 10, 20, true));
+  }), counts(30, 280, 60, 10, 20, false, 900));
 });
 
 test("TRAE keeps known separate reasoning when aggregate completions exclude it", () => {
@@ -50,7 +52,7 @@ test("TRAE keeps known separate reasoning when aggregate completions exclude it"
     cache_read_input_tokens: 60,
     reasoning_tokens: 20,
     total_tokens: 150,
-  }), counts(940, 300, 60, 0, 20, true));
+  }), counts(40, 300, 60, 0, 20, false, 900));
 });
 
 test("TRAE accepts explicit null optional fields and zero aggregate placeholders", () => {
@@ -89,7 +91,7 @@ test("TRAE accepts aggregate-only usage and independent prompt/completion aggreg
     completion_tokens: 30,
     completion_tokens_total: 0,
     total_tokens: 130,
-  }), counts(1_000, 30, 0, 0, 0, true));
+  }), counts(100, 30, 0, 0, 0, false, 900));
 });
 
 test("TRAE Gemini omitted thoughts are an explicitly estimated residual", () => {
@@ -116,7 +118,7 @@ test("TRAE Gemini residual recovery supports multistep counters and persisted mo
     completion_tokens_total: 148,
     total_tokens: 137_311,
     reasoning_tokens: null,
-  }), counts(274_088, 148, 0, 0, 70, true));
+  }), counts(137_193, 148, 0, 0, 70, true, 136_895));
 });
 
 test("TRAE Gemini impossible duplicate cache-write counters do not double bill reads", () => {
@@ -175,4 +177,19 @@ test("TRAE rejects decreasing aggregates, invalid integers and unproven counter 
   }
   assert.equal(normalizeTraeUsage({ ...base, reasoning_tokens: 0, total_tokens: 999 },
     { model: "Gemini-3-Pro-Preview" }), null, "explicit reasoning is not replaced by a guessed residual");
+});
+
+test("TRAE never prices the earlier requests' input, whatever the model's cache price", () => {
+  const usage = {
+    prompt_tokens: 100, prompt_tokens_total: 10_100, completion_tokens: 10, completion_tokens_total: 10,
+    cache_read_input_tokens: 90, total_tokens: 110,
+  };
+  const totals = normalizeTraeUsage(usage, { model: "gpt-5.2" });
+  assert.equal(totals.unpriced_input_tokens, 10_000);
+  assert.equal(totals.total_tokens, 10_110, "the earlier input still counts toward usage");
+  const lastRequestOnly = normalizeTraeUsage({ ...usage, prompt_tokens_total: 100 }, { model: "gpt-5.2" });
+  assert.equal(computeRowCost({ source: "trae", model: "gpt-5.2", ...totals }),
+    computeRowCost({ source: "trae", model: "gpt-5.2", ...lastRequestOnly }),
+    "10,000 unsplit input tokens add no cost");
+  assert.equal(totals.usage_precision, undefined, "an unsplit remainder is not an estimate");
 });

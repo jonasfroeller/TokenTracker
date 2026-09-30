@@ -483,7 +483,7 @@ describe("UsageOverview", () => {
     expect(screen.queryByText(copy("usage.overview.week_cross_month_hint"))).toBeNull();
   });
 
-  it("keeps the TRAE estimate notice visible beside combined totals in collapsed and expanded views", async () => {
+  it("keeps the TRAE partial-cost notice visible beside combined totals in collapsed and expanded views", async () => {
     const user = userEvent.setup();
     render(
       <UsageOverview
@@ -522,7 +522,7 @@ describe("UsageOverview", () => {
     }
   });
 
-  it("does not apply the international TRAE estimate notice to TRAE-CN or unrelated sources", () => {
+  it("does not apply the international TRAE partial-cost notice to TRAE-CN or unrelated sources", () => {
     const props = {
       period: "month",
       periods: [],

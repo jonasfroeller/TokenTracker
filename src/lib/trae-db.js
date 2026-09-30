@@ -104,8 +104,8 @@ async function readTraeUsageRows(dbPath, { env = process.env } = {}) {
     let snapshot;
     try { snapshot = openTraeSnapshot(dbPath, env); }
     catch (err) {
-      // The same writer race can surface while opening; retry it, but report
-      // the specific failure once the attempts run out.
+      // A writer can also change the files while the snapshot opens. Retry
+      // that too, and report the specific failure once attempts run out.
       if (err?.transient && attempt < 2) continue;
       throw err;
     }

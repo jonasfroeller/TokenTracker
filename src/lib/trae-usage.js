@@ -56,7 +56,7 @@ function normalizeTraeUsage(raw, { model } = {}) {
   }
   // A total is necessary to distinguish inclusive/exclusive counters when
   // cache or reasoning is present. Missing metadata must not imply $0 usage
-  // or guessed input. Zero *_total fields are placeholders in observed data.
+  // or guessed input. A zero *_total field means unset, not an empty turn.
   if (usage.total_tokens == null && (cached || written || reasoning)) return null;
   const total = usage.total_tokens ?? (input + output);
   if (!Number.isSafeInteger(total)) return null;
@@ -81,14 +81,14 @@ function normalizeTraeUsage(raw, { model } = {}) {
   if (candidates.size !== 1) return null;
   const totals = candidates.values().next().value;
   if (aggregateInput !== input || aggregateOutput !== output) {
-    // Only the last request has a cache/reasoning breakdown. Credit that known
-    // cache once; keep the remaining reported prompt/completion tokens in their
-    // unsplit columns. Historical cache can make the model-price estimate too
-    // high, and historical separate thoughts may be absent. Do not invent them.
-    totals.input_tokens += aggregateInput - input;
+    // The *_total counters cover the whole turn; the cache and reasoning fields
+    // describe its final request. The difference in prompt tokens has no cache
+    // split, so it counts toward total_tokens but no priced column. Completion
+    // tokens are priced the same with or without caching and stay in output.
+    const unpriced = aggregateInput - input;
     totals.output_tokens += aggregateOutput - output;
-    totals.total_tokens += aggregateInput - input + aggregateOutput - output;
-    estimated = true;
+    totals.total_tokens += unpriced + aggregateOutput - output;
+    if (unpriced > 0) totals.unpriced_input_tokens = unpriced;
   }
   if (Object.values(totals).some((value) => !Number.isSafeInteger(value))) return null;
   if (estimated) totals.usage_precision = "estimated";

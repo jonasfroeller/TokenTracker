@@ -27,12 +27,15 @@ CN directories and `database_decrypted.db` siblings, which may be stale.
 
 ## Accounting and limitations
 
-Some aggregate turns keep only the last request's cache and reasoning
-breakdown. The reader counts each known contribution once and marks incomplete
-breakdowns as estimated, and the dashboard shows a note beside the totals.
-Older Gemini records with omitted thoughts or duplicated cache-write counters
-are repaired and also marked estimated. Cost figures use TokenTracker's model
-prices, not a vendor bill.
+For a turn with several model requests, TRAE records whole-turn prompt and
+completion totals, but its cache and reasoning fields describe the final
+request. The reader prices that request's split. The rest of the turn's prompt
+tokens have no cache split, so they count toward `total_tokens` but no priced
+column, and TRAE cost is partial; the dashboard says so beside the totals.
+Completion tokens stay priced, since output costs the same with or without a
+cache hit. Older Gemini records with omitted
+thoughts or duplicated cache-write counters are repaired and marked estimated.
+Cost figures use TokenTracker's model prices, not a vendor bill.
 
 Corrections replace earlier contributions, even when the model or timestamp
 changes, and turns copied between installations are counted once. Deleting

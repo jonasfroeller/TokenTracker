@@ -10,8 +10,7 @@ const path = require("node:path");
 
 // src/lib/trae-sqlite.js imports the synchronous build, the package entry
 // (sqlite-api.js) and FacadeVFS.js; those two import VFS.js and
-// sqlite-constants.js. The other 14 dist builds (async, JSPI, dynamic, mc-*),
-// the tests and the examples are about 17 MB the runtime never loads.
+// sqlite-constants.js. Nothing else in the package is loaded at runtime.
 const KEEP = {
   "@journeyapps/wa-sqlite": [
     "package.json",
@@ -44,7 +43,7 @@ function trimEmbeddedDeps(nodeModules) {
   let removedBytes = 0;
   for (const [name, keep] of Object.entries(KEEP)) {
     const root = path.join(nodeModules, ...name.split("/"));
-    // A missing file would only fail at runtime on a user's machine.
+    // Fail the build: a missing file would otherwise fail only at runtime.
     const missing = keep.filter((file) => !OPTIONAL.has(file) && !fs.existsSync(path.join(root, file)));
     if (missing.length) throw new Error(`${name} is missing ${missing.join(", ")}; update KEEP in ${__filename}`);
     const kept = new Set(keep);

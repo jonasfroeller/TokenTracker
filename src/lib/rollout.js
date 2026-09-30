@@ -21694,18 +21694,18 @@ function isCjkCodePoint(code) {
 //
 // The ledger keeps one compact tuple per turn, keyed by a 128-bit digest, so a
 // correction can retract exactly what the turn contributed even after TRAE
-// deletes its history. Totals are the five token columns; total_tokens is
-// their sum by construction in normalizeTraeUsage.
-const TRAE_CURSOR_VERSION = 1;
+// deletes its history. total_tokens is the five token columns plus any input
+// without a cache split, which is counted but unpriced (normalizeTraeUsage).
+const TRAE_CURSOR_VERSION = 2;
 const HALF_HOUR_MS = 30 * 60 * 1000;
 const [T_SESSION, T_MODEL, T_BUCKET, T_MODIFIED, T_STORE, T_INPUT, T_CACHED, T_WRITTEN,
-  T_OUTPUT, T_REASONING, T_CONVERSATIONS, T_ESTIMATED] = Array.from({ length: 12 }, (_, i) => i);
+  T_OUTPUT, T_REASONING, T_CONVERSATIONS, T_ESTIMATED, T_UNPRICED] = Array.from({ length: 13 }, (_, i) => i);
 
 function packTraeTurn({ session, model, bucketStart, totals, modifiedAt, store }) {
   return [session, model, Date.parse(bucketStart) / HALF_HOUR_MS, modifiedAt, store,
     totals.input_tokens, totals.cached_input_tokens, totals.cache_creation_input_tokens,
     totals.output_tokens, totals.reasoning_output_tokens, totals.conversation_count,
-    totals.usage_precision === "estimated" ? 1 : 0];
+    totals.usage_precision === "estimated" ? 1 : 0, totals.unpriced_input_tokens || 0];
 }
 
 function unpackTraeTotals(turn) {
@@ -21715,7 +21715,8 @@ function unpackTraeTotals(turn) {
     cache_creation_input_tokens: turn[T_WRITTEN],
     output_tokens: turn[T_OUTPUT],
     reasoning_output_tokens: turn[T_REASONING],
-    total_tokens: turn[T_INPUT] + turn[T_CACHED] + turn[T_WRITTEN] + turn[T_OUTPUT] + turn[T_REASONING],
+    total_tokens: turn[T_INPUT] + turn[T_CACHED] + turn[T_WRITTEN] + turn[T_OUTPUT] + turn[T_REASONING]
+      + turn[T_UNPRICED],
     conversation_count: turn[T_CONVERSATIONS],
   };
   if (turn[T_ESTIMATED]) totals.usage_precision = "estimated";
@@ -21742,9 +21743,9 @@ async function parseTraeIncremental({
     key, key.startsWith("trae|") ? { ...bucket, totals: { ...bucket.totals } } : bucket,
   ]));
   hourlyState.groupQueued = { ...hourlyState.groupQueued };
-  // A ledger this version cannot read (e.g. from a pre-release build) cannot
-  // retract what it contributed, so rebuild the TRAE buckets from the stores
-  // instead of adding every turn on top of them.
+  // A ledger with another TRAE_CURSOR_VERSION cannot retract what it
+  // contributed, so rebuild the TRAE buckets from the stores instead of
+  // adding every turn on top of them.
   const prior = cursors.trae?.version === TRAE_CURSOR_VERSION ? cursors.trae : null;
   const rebuilding = !prior && Boolean(cursors.trae);
   if (rebuilding) clearSourceHourlyBuckets(hourlyState, "trae");
@@ -21760,6 +21761,7 @@ async function parseTraeIncremental({
   let eventsAggregated = 0;
   let recordsSkipped = 0;
   let estimatedRecords = 0;
+  let unpricedRecords = 0;
   const errors = [];
   for (const dbPath of [...new Set(paths)]) {
     const databaseKey = digest(path.resolve(dbPath));
@@ -21806,6 +21808,7 @@ async function parseTraeIncremental({
       if (previous && previous[T_STORE] !== store && modifiedAt <= previous[T_MODIFIED]) continue;
       if (!previous && totals.total_tokens === 0) continue;
       if (totals.usage_precision === "estimated") estimatedRecords += 1;
+      if (totals.unpriced_input_tokens > 0) unpricedRecords += 1;
       totals.conversation_count = previous
         ? previous[T_CONVERSATIONS]
         : conversations.has(session) ? 0 : 1;
@@ -21858,15 +21861,15 @@ async function parseTraeIncremental({
     // was read; otherwise an unreadable store's usage would vanish. Keep the
     // old ledger so the next sync rebuilds again.
     if (errors.length) {
-      return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, errors };
+      return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, unpricedRecords, errors };
     }
-    // An earlier build may have filed a turn under another bucket key (model or
+    // The old ledger may have filed a turn under another bucket key (model or
     // half-hour); retract those rows so the dashboard does not count it twice.
     const keepKeys = new Set(Object.keys(hourlyState.buckets).filter((key) => key.startsWith("trae|")));
     bucketsQueued += await retractStaleSourceQueueRows(queuePath, "trae", keepKeys);
   }
   cursors.trae = { version: TRAE_CURSOR_VERSION, stores, databases, turns };
-  return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, errors };
+  return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, unpricedRecords, errors };
 }
 
 // Ordered candidate app-dir names. The CN IDE build installs as "Trae CN" on

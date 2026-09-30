@@ -340,9 +340,9 @@ export function UsageOverview({
     (provider) =>
       String(provider?.source || provider?.label || "").trim().toLowerCase() === "devin",
   );
-  // Some historical TRAE turns expose only aggregate prompt/completion
-  // counters. Keep the caveat visible with the combined totals, including
-  // cloud data where the per-bucket precision marker is not preserved.
+  // TRAE cost leaves out input without a cache split (docs/trae.md). Keep the
+  // caveat visible with the combined totals, including cloud data, which has
+  // no per-bucket marker.
   const traeContributes = providers.some(
     (provider) =>
       String(provider?.source || provider?.label || "").trim().toLowerCase() === "trae",

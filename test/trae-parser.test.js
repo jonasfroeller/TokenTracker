@@ -226,9 +226,9 @@ test("TRAE parser rebuilds its buckets from an unreadable ledger without duplica
   const f = fixture(t);
   await parse(f, [turn()]);
   assert.equal(latest(f.queuePath).total_tokens, 110);
-  // A pre-release build's ledger: same buckets, entries this version cannot read.
-  f.cursors.trae = { version: 2, turns: { legacy: { totals: { total_tokens: 110 } } }, databases: {} };
-  // That build also filed a turn under a model key this version no longer produces.
+  // A ledger from another cursor version: same buckets, unreadable entries.
+  f.cursors.trae = { version: 1, turns: { legacy: { totals: { total_tokens: 110 } } }, databases: {} };
+  // It also filed a turn under a model key this version no longer produces.
   fs.appendFileSync(f.queuePath, `${JSON.stringify({
     source: "trae", model: "claude-4-sonnet", hour_start: B1, input_tokens: 90, output_tokens: 9, total_tokens: 99,
   })}\n`);
@@ -247,9 +247,9 @@ test("TRAE parser rebuilds its buckets from an unreadable ledger without duplica
   const rebuilt = await parse(f, [], options);
   assert.equal(reads, 1, "an unchanged store behind an unreadable ledger is reread");
   assert.equal(rebuilt.eventsAggregated, 2, "every turn is re-imported into cleared buckets");
-  assert.equal(f.cursors.trae.version, 1);
+  assert.equal(f.cursors.trae.version, 2);
   assert.equal(latest(f.queuePath).total_tokens, 330, "110 + 220, not 110 on top of the old bucket");
-  assert.equal(latest(f.queuePath).usage_precision, "mixed");
+  assert.equal(latest(f.queuePath).input_tokens, 160, "100 + the aggregate's last request, not its earlier prompt");
   assert.equal(latest(f.queuePath, "claude-4-sonnet").total_tokens, 0, "a key the rebuild no longer produces is retracted");
   const queueBefore = fs.readFileSync(f.queuePath, "utf8");
   await parse(f, [], options);
@@ -265,27 +265,27 @@ test("TRAE parser retries a rebuild instead of retracting usage from an unreadab
   const both = { dbPaths: [f.dbPath, other], readUsageRows: async (db) => rows[db] };
   await parse(f, [], both);
   assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
-  f.cursors.trae = { version: 2, turns: {}, databases: {} };
+  f.cursors.trae = { version: 1, turns: {}, databases: {} };
   const locked = await parse(f, [], {
     ...both,
     readUsageRows: async (db) => { if (db === other) throw new Error("locked"); return rows[db]; },
   });
   assert.equal(locked.errors.length, 1);
   assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110, "the locked store's usage is not retracted");
-  assert.equal(f.cursors.trae.version, 2, "the rebuild is retried on the next sync");
+  assert.equal(f.cursors.trae.version, 1, "the rebuild is retried on the next sync");
   await parse(f, [], both);
-  assert.equal(f.cursors.trae.version, 1);
+  assert.equal(f.cursors.trae.version, 2);
   assert.equal(latest(f.queuePath).total_tokens, 110, "no double count after the retried rebuild");
   assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
 });
 
 test("TRAE ledger stores one compact tuple per turn and reproduces its totals", async (t) => {
   const f = fixture(t);
-  const estimated = turn({
+  const multiRequest = turn({
     id: 2, turn_id: "turn-two", created_at: T2,
     usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_total: 300 },
   });
-  await parse(f, [turn(), estimated]);
+  await parse(f, [turn(), multiRequest]);
   const { turns, stores, databases } = f.cursors.trae;
   assert.equal(stores.length, 1);
   assert.equal(Object.keys(databases).length, 1);
@@ -293,19 +293,20 @@ test("TRAE ledger stores one compact tuple per turn and reproduces its totals", 
   assert.equal(entries.length, 2);
   for (const [key, entry] of entries) {
     assert.match(key, /^[\w-]{22}$/, "turn keys are 128-bit digests");
-    assert.ok(Array.isArray(entry) && entry.length === 12);
+    assert.ok(Array.isArray(entry) && entry.length === 13);
     assert.match(entry[0], /^[\w-]{22}$/, "session ids are stored as digests");
     assert.ok(JSON.stringify(entry).length < 120, `compact entry: ${JSON.stringify(entry)}`);
   }
   assert.ok(!JSON.stringify(f.cursors.trae).includes("session-one"));
   assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 310);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).usage_precision, "estimated");
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).input_tokens, 100, "the earlier 200 input tokens stay unpriced");
+  assert.ok(entries.some(([, entry]) => entry[12] === 200), "the ledger keeps the unpriced input to retract it");
   // A correction retracts exactly the stored contribution from both buckets.
   changed(f.dbPath);
-  await parse(f, [turn({ usage: usage(40, 4) }), { ...estimated, usage: usage(50, 5) }]);
+  await parse(f, [turn({ usage: usage(40, 4) }), { ...multiRequest, usage: usage(50, 5) }]);
   assert.equal(latest(f.queuePath).total_tokens, 44);
   assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 55);
-  assert.ok(!latest(f.queuePath, "gpt-5.2", B2).usage_precision, "the estimate flag is retracted too");
+  assert.equal(latest(f.queuePath, "gpt-5.2", B2).input_tokens, 50);
 });
 
 test("TRAE parser detects usage updates written only to the SQLite WAL", async (t) => {
@@ -508,7 +509,7 @@ test("TRAE parser persists no raw identifiers, conversation content, or decrypti
   for (const canary of canaries) assert.ok(!persisted.includes(canary), `does not persist ${canary}`);
 });
 
-test("TRAE parser preserves estimated breakdowns and clears precision after an exact correction", async (t) => {
+test("TRAE parser prices only the observed split and publishes a correction that splits earlier input", async (t) => {
   const f = fixture(t);
   const aggregate = turn({ usage: {
     prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
@@ -516,9 +517,13 @@ test("TRAE parser preserves estimated breakdowns and clears precision after an e
     cache_read_input_tokens: 40,
   } });
   const first = await parse(f, [aggregate]);
-  assert.equal(first.estimatedRecords, 1);
+  assert.equal(first.unpricedRecords, 1);
+  assert.equal(first.estimatedRecords, 0, "unsplit input is left unpriced, not estimated");
   assert.equal(latest(f.queuePath).total_tokens, 220);
-  assert.equal(latest(f.queuePath).usage_precision, "estimated");
+  assert.equal(latest(f.queuePath).input_tokens, 60);
+  assert.equal(latest(f.queuePath).cached_input_tokens, 40);
+  assert.equal(latest(f.queuePath).output_tokens, 20);
+  assert.equal(latest(f.queuePath).usage_precision, undefined);
   const queueBefore = fs.readFileSync(f.queuePath, "utf8");
   f.cursors = JSON.parse(JSON.stringify(f.cursors));
   await parse(f, [aggregate]);
@@ -529,10 +534,10 @@ test("TRAE parser preserves estimated breakdowns and clears precision after an e
     prompt_tokens: 200, completion_tokens: 20, total_tokens: 220,
     cache_read_input_tokens: 40,
   } })]);
-  assert.equal(corrected.estimatedRecords, 0);
-  assert.equal(corrected.eventsAggregated, 1, "a precision-only correction is published");
+  assert.equal(corrected.unpricedRecords, 0);
+  assert.equal(corrected.eventsAggregated, 1, "a correction that only splits the input is published");
   assert.equal(latest(f.queuePath).total_tokens, 220);
-  assert.equal(latest(f.queuePath).usage_precision, undefined);
+  assert.equal(latest(f.queuePath).input_tokens, 160, "the now-split input is priced");
   assert.equal(queueRows(f.queuePath).length, 2);
 });
 
@@ -540,35 +545,34 @@ test("TRAE mixed bucket precision retains estimates from an unchanged store and 
   const f = fixture(t);
   const secondDb = path.join(f.dir, "reported.db");
   fs.writeFileSync(secondDb, "reported-store");
-  let aggregate = turn({ usage: {
-    prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
-    prompt_tokens_total: 200, completion_tokens_total: 20,
-    cache_read_input_tokens: 40,
-  } });
-  let reported = turn({ session_id: "reported-session", turn_id: "reported-turn", usage: usage(50, 5) });
+  // Gemini rows that omit thoughts are repaired and marked estimated.
+  const gemini = "Gemini-3-Pro-Preview";
+  let aggregate = turn({ model: gemini, usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 130 } });
+  let reported = turn({ model: gemini, session_id: "reported-session", turn_id: "reported-turn", usage: usage(50, 5) });
   const options = {
     dbPaths: [f.dbPath, secondDb],
     readUsageRows: async (dbPath) => [dbPath === secondDb ? reported : aggregate],
   };
+  const model = "gemini-3-pro-preview";
   await parse(f, [], options);
-  assert.equal(latest(f.queuePath).usage_precision, "mixed");
+  assert.equal(latest(f.queuePath, model).usage_precision, "mixed");
   changed(secondDb);
   reported = { ...reported, usage: usage(60, 6) };
   await parse(f, [], options);
-  assert.equal(latest(f.queuePath).usage_precision, "mixed", "unchanged estimated contribution remains visible");
+  assert.equal(latest(f.queuePath, model).usage_precision, "mixed", "unchanged estimated contribution remains visible");
 
   changed(f.dbPath);
   aggregate = { ...aggregate, created_at: T2 };
   await parse(f, [], options);
-  assert.equal(latest(f.queuePath).total_tokens, 66);
-  assert.equal(latest(f.queuePath).usage_precision, undefined);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).usage_precision, "estimated");
+  assert.equal(latest(f.queuePath, model).total_tokens, 66);
+  assert.equal(latest(f.queuePath, model).usage_precision, undefined);
+  assert.equal(latest(f.queuePath, model, B2).usage_precision, "estimated");
 
   changed(f.dbPath);
   aggregate = { ...aggregate, usage: usage(0, 0) };
   await parse(f, [], options);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 0);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).usage_precision, undefined);
+  assert.equal(latest(f.queuePath, model, B2).total_tokens, 0);
+  assert.equal(latest(f.queuePath, model, B2).usage_precision, undefined);
 });
 
 test("TRAE copied turns cannot replace newer usage with a stale snapshot", async (t) => {
