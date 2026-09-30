@@ -257,26 +257,36 @@ test("TRAE parser rebuilds its buckets from an unreadable ledger without duplica
   assert.equal(fs.readFileSync(f.queuePath, "utf8"), queueBefore);
 });
 
-test("TRAE parser retries a rebuild instead of retracting usage from an unreadable store", async (t) => {
+test("TRAE parser publishes nothing from a rebuild while a store is unreadable", async (t) => {
   const f = fixture(t);
   const other = path.join(f.dir, "other.db");
   fs.writeFileSync(other, "synthetic-database");
-  const rows = { [f.dbPath]: [turn()], [other]: [turn({ id: 9, session_id: "session-two", turn_id: "turn-nine", created_at: T2 })] };
+  // Both stores contribute to the same bucket (model and half-hour).
+  const rows = {
+    [f.dbPath]: [turn()],
+    [other]: [turn({ id: 9, session_id: "session-two", turn_id: "turn-nine", usage: usage(50, 5) })],
+  };
   const both = { dbPaths: [f.dbPath, other], readUsageRows: async (db) => rows[db] };
   await parse(f, [], both);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
+  assert.equal(latest(f.queuePath).total_tokens, 165);
   f.cursors.trae = { version: 1, turns: {}, databases: {} };
-  const locked = await parse(f, [], {
+  const hourlyBefore = JSON.stringify(f.cursors.hourly);
+  const queueBefore = fs.readFileSync(f.queuePath, "utf8");
+  const lockedOptions = {
     ...both,
     readUsageRows: async (db) => { if (db === other) throw new Error("locked"); return rows[db]; },
-  });
-  assert.equal(locked.errors.length, 1);
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110, "the locked store's usage is not retracted");
-  assert.equal(f.cursors.trae.version, 1, "the rebuild is retried on the next sync");
+  };
+  for (let sync = 1; sync <= 2; sync += 1) {
+    const locked = await parse(f, [], lockedOptions);
+    assert.equal(locked.errors.length, 1);
+    assert.equal(locked.bucketsQueued, 0);
+    assert.equal(fs.readFileSync(f.queuePath, "utf8"), queueBefore, `sync ${sync} leaves the queue unchanged`);
+    assert.equal(JSON.stringify(f.cursors.hourly), hourlyBefore, `sync ${sync} keeps the old hourly state`);
+    assert.equal(f.cursors.trae.version, 1, "the rebuild is retried on the next sync");
+  }
   await parse(f, [], both);
   assert.equal(f.cursors.trae.version, 2);
-  assert.equal(latest(f.queuePath).total_tokens, 110, "no double count after the retried rebuild");
-  assert.equal(latest(f.queuePath, "gpt-5.2", B2).total_tokens, 110);
+  assert.equal(latest(f.queuePath).total_tokens, 165, "no double count after the retried rebuild");
 });
 
 test("TRAE ledger stores one compact tuple per turn and reproduces its totals", async (t) => {

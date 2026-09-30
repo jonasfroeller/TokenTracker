@@ -21853,16 +21853,16 @@ async function parseTraeIncremental({
     const precision = bucketPrecisions.get(key);
     hourlyState.buckets[key].usage_precision = precision === "reported" ? null : precision || null;
   }
+  // A rebuild is all or nothing. Buckets rebuilt from a subset of the stores
+  // would replace shared buckets with partial totals, and each retry would
+  // append every row again. Keep the old hourly state and ledger instead.
+  if (rebuilding && errors.length) {
+    return { recordsProcessed, eventsAggregated, bucketsQueued: 0, recordsSkipped, estimatedRecords, unpricedRecords, errors };
+  }
   await ensureDir(path.dirname(queuePath));
   let bucketsQueued = await enqueueTouchedBuckets({ queuePath, hourlyState, touchedBuckets });
   cursors.hourly = hourlyState;
   if (rebuilding) {
-    // Zeroing rows the rebuild did not produce is only safe once every store
-    // was read; otherwise an unreadable store's usage would vanish. Keep the
-    // old ledger so the next sync rebuilds again.
-    if (errors.length) {
-      return { recordsProcessed, eventsAggregated, bucketsQueued, recordsSkipped, estimatedRecords, unpricedRecords, errors };
-    }
     // The old ledger may have filed a turn under another bucket key (model or
     // half-hour); retract those rows so the dashboard does not count it twice.
     const keepKeys = new Set(Object.keys(hourlyState.buckets).filter((key) => key.startsWith("trae|")));

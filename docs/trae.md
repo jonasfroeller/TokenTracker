@@ -32,6 +32,8 @@ completion totals, but its cache and reasoning fields describe the final
 request. The reader prices that request's split. The rest of the turn's prompt
 tokens have no cache split, so they count toward `total_tokens` but no priced
 column, and TRAE cost is partial; the dashboard says so beside the totals.
+In agent sessions, where most prompt tokens belong to earlier requests, the
+displayed cost can be a small fraction of what those tokens would cost.
 Completion tokens stay priced, since output costs the same with or without a
 cache hit. Older Gemini records with omitted
 thoughts or duplicated cache-write counters are repaired and marked estimated.

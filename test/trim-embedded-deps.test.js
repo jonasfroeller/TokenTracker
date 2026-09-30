@@ -62,6 +62,13 @@ test("every desktop bundle step runs the dependency trim", () => {
   }
 });
 
+test("the trim leaves packages npm did not install to npm", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokentracker-trim-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  assert.equal(trimEmbeddedDeps(dir), 0, "an empty node_modules");
+  assert.equal(trimEmbeddedDeps(path.join(dir, "missing")), 0, "no node_modules at all");
+});
+
 test("the trim refuses to ship a package missing a runtime file", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokentracker-trim-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

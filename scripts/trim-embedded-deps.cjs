@@ -43,6 +43,8 @@ function trimEmbeddedDeps(nodeModules) {
   let removedBytes = 0;
   for (const [name, keep] of Object.entries(KEEP)) {
     const root = path.join(nodeModules, ...name.split("/"));
+    // Installing packages is npm's job; only trim what it installed.
+    if (!fs.existsSync(root)) continue;
     // Fail the build: a missing file would otherwise fail only at runtime.
     const missing = keep.filter((file) => !OPTIONAL.has(file) && !fs.existsSync(path.join(root, file)));
     if (missing.length) throw new Error(`${name} is missing ${missing.join(", ")}; update KEEP in ${__filename}`);
